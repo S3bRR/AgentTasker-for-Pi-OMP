@@ -1,135 +1,122 @@
 # AgentTasker for Pi & OMP
 
-[![Tests](https://github.com/S3bRR/AgentTasker-for-Pi-OMP/actions/workflows/test.yml/badge.svg)](https://github.com/S3bRR/AgentTasker-for-Pi-OMP/actions/workflows/test.yml)
+[![Verify](https://github.com/S3bRR/AgentTasker-for-Pi-OMP/actions/workflows/test.yml/badge.svg)](https://github.com/S3bRR/AgentTasker-for-Pi-OMP/actions/workflows/test.yml)
 
 **Plan work. Run four shell jobs at once. Collect the results.**
 
-A small, local stdio MCP server for [Pi](https://pi.dev) and
-[OMP](https://github.com/can1357/oh-my-pi). Your existing coding model makes the
-plan; AgentTasker runs the commands concurrently. No extra model account, API key,
-agent subscription, hosted service, or third-party Python runtime dependency.
+A dependency-free stdio MCP server for [Pi](https://pi.dev) and
+[OMP](https://github.com/can1357/oh-my-pi). Your existing model makes the plan;
+AgentTasker runs the commands. No extra model account, API key or hosted service.
 
-- **Real background batches:** return a batch ID immediately; keep working.
-- **Configurable concurrency:** four workers in the installer, shared across batches.
-- **Dependency plans:** sequence only the jobs that need earlier results.
-- **Useful results:** exit codes, stdout/stderr tails, host, cwd, timing and truncation flags.
-- **Cancellation and deadlines:** stop queued work and terminate shell process groups.
-- **Local or SSH:** choose where the MCP server—and therefore commands—run.
-- **Non-destructive setup:** explicit profile selection, backups, no config writes without `--apply`.
+- Configurable concurrency, background batch IDs and dependency ordering.
+- Per-command exit codes, stdout/stderr tails, host, cwd and timing.
+- Timeouts and cancellation of running shell process groups.
+- Explicit local or SSH execution; no silent local fallback.
+- Profile-aware installer that preserves other MCP entries and makes private backups.
 
-**Requirements:** Python 3.10+, Git, and Bash on Linux/macOS (or WSL).
-First local installation needs pip/build-tool downloads. SSH mode also needs
-OpenSSH, a POSIX server with AgentTasker installed, and already-authorized access.
-Native Windows shell execution is not supported. Pi/OMP must support stdio MCP.
+**Requires:** Python 3.10+, Git and Bash on Linux/macOS/WSL. First installation
+needs pip/build-tool downloads. SSH mode needs OpenSSH and an already-authorized
+POSIX host. Native Windows shell execution is not supported.
 
-> **Security:** `--allow-shell` enables arbitrary commands with the server user's
-> permissions. This is not a sandbox. MCP does **not** inherit your agent's SSH
-> routing. Commands run on the MCP server's host. Choose local or SSH explicitly.
-> [Read the security boundary →](SECURITY.md)
+> `--allow-shell` permits arbitrary commands as the server user. This is **not a
+> sandbox**. Commands run on the MCP server's host, not automatically on your
+> agent's SSH host. [Security and boundaries](SECURITY.md).
 
-## Let your agent install it
-
-**Copy this entire block into Pi or OMP:**
+## Copy this to your agent
 
 ```text
-Install AgentTasker for Pi & OMP from:
-https://github.com/S3bRR/AgentTasker-for-Pi-OMP
+Install https://github.com/S3bRR/AgentTasker-for-Pi-OMP from a fresh clone in a
+stable location. Read README.md, SECURITY.md and the installer before running it.
+Confirm my client (Pi/OMP), active profile's exact mcp.json, execution host
+(local or an explicitly authorized SSH host), and existing workspace directory.
+Ask for missing choices; never guess a VM or copy another profile's route.
 
-Read README.md, INSTALL.md and SECURITY.md before executing installation code.
-Use a fresh clone in a stable location; do not execute a remote curl-to-shell script.
-Confirm my client (Pi or OMP), active profile's exact mcp.json, workspace directory,
-and whether commands should run locally or on an explicitly authorized SSH host.
-Ask me for missing choices; never guess a VM or copy another profile's SSH route.
+Use install.py with four workers and --allow-shell only on my chosen host.
+Preview the generated entry, then merge with --apply. Preserve other servers,
+models, credentials and safety policies. Ask before replacing a different
+agent-tasker entry with --replace. Never print secrets or bypass host-key checks.
 
-Use the repository's installer with four workers and --allow-shell only on my
-chosen execution host. Preview the generated entry, then merge it with --apply.
-Preserve other MCP entries, models, credentials and safety policies. If agent-tasker
-already exists, show the difference and ask before using --replace. Never print
-secrets or disable host-key checking, authentication, or a VM-only policy.
-
-Run the documented doctor --shell-test, then verify from a fresh/reloaded agent
-session: launch four harmless jobs with execute_batch(wait=false, concurrency=4),
-collect them with get_batch, and check host/cwd, outputs, exit codes and overlap.
-Client-only tests are not enough if this profile has a custom tool guard.
-If a policy blocks it, report the exact blocker; do not bypass it or fall back locally.
-
-Offer to add the short AGENTS.md guidance from docs/agent-guide.md to my active
-profile. Report exactly what changed, backup locations, tests and anything unverified.
+Run the doctor --shell-test, then verify in a fresh/reloaded agent session:
+execute_batch(wait=false, concurrency=4), collect with get_batch, and check
+outputs, exits, host/cwd and overlap. A client-only check does not verify a
+custom tool guard. If blocked, report it; do not disable policies or fall back
+locally. Report config changes, backups, checks and anything unverified.
 ```
 
-Full instructions for the installing agent: **[INSTALL.md](INSTALL.md)**.
+## Install locally
 
-## Manual quick start: local execution
-
-Clone to a location you will keep, and choose an **existing workspace**:
+Clone to a stable location. Replace the workspace placeholder with an existing
+directory **on the machine where commands should run**:
 
 ```bash
-git clone https://github.com/S3bRR/AgentTasker-for-Pi-OMP.git
+git clone --depth 1 https://github.com/S3bRR/AgentTasker-for-Pi-OMP.git
 cd AgentTasker-for-Pi-OMP
+./setup.sh --client pi --cwd /absolute/workspace --allow-shell --apply
 ```
 
-### Pi
+- **Pi:** respects `PI_CODING_AGENT_DIR`, otherwise uses `~/.pi/agent/mcp.json`.
+  Pass `--config /absolute/active/mcp.json` for a custom profile.
+- **OMP:** replace `--client pi` with `--client omp --config /absolute/active/mcp.json`,
+  or `--client omp --profile YOUR_NAMED_PROFILE`. Its standard default config is
+  `~/.omp/agent/mcp.json`; the active profile is never guessed.
+- **Preview:** omit `--apply` to install and print config without changing client settings.
+- **Options:** `python3 install.py --help`. Default workers: 4; configurable 1–256.
+  `--skip-install` generates/merges config using an existing `--venv`.
+
+The installer creates `.venv` in the checkout. Keep both in place. It rejects
+malformed/duplicate-key JSON, symlink config targets and unapproved collisions.
+`--replace --apply` changes only an existing AgentTasker entry after review.
+Backups are private `mcp.json.backup-*` files beside your config; never share them.
+No models, approval policies or agent instructions are changed.
+
+## Run on a VM instead
+
+Do **not** use the local entry for a remote-only profile.
+
+1. On the authorized VM, clone this repo and run
+   `python3 install.py --client generic --cwd /absolute/remote/workspace --allow-shell`.
+   This installs there and prints the remote venv's absolute Python path.
+2. On the client, generate the SSH entry using that path:
 
 ```bash
-./setup.sh --client pi --cwd /absolute/path/to/workspace --allow-shell --apply
+python3 install.py --client pi --transport ssh \
+  --ssh-host YOUR_AUTHORIZED_SSH_ALIAS \
+  --remote-python /absolute/remote/AgentTasker-for-Pi-OMP/.venv/bin/python \
+  --cwd /absolute/remote/workspace --allow-shell --apply
 ```
 
-This respects `PI_CODING_AGENT_DIR`, otherwise uses `~/.pi/agent/mcp.json`.
-For a different profile, pass `--config /absolute/path/to/active/mcp.json`.
-The generated Pi entry exposes the five tools directly.
+Use the same OMP/profile options described above. Optional: `--ssh-config PATH`
+for an existing client SSH config, or `--ssh-port PORT`. SSH mode does not create
+a local execution server or connect automatically. Authenticate and verify the
+host key through your normal workflow first. No credentials are copied.
 
-### OMP
+## Verify and use
 
-For the **standard default** agent directory:
+Reload/restart the selected client. From the checkout:
 
 ```bash
-./setup.sh --client omp --config "$HOME/.omp/agent/mcp.json" \
-  --cwd /absolute/path/to/workspace --allow-shell --apply
+python3 -m agent_tasker_mcp.doctor --config /absolute/active/mcp.json --shell-test
 ```
 
-For a named profile, use `--profile YOUR_PROFILE` instead of `--config`.
-If your installation uses a custom agent directory, pass its exact `mcp.json`.
-The installer never guesses the active OMP profile or changes your default model.
+Or use `.venv/bin/agent-tasker-doctor` after local installation. The doctor checks
+four-way overlap, outputs/exits, failed-dependency isolation, cancellation and
+timeouts using harmless commands on the configured host. Check its reported host
+and cwd. Omit `--shell-test` for protocol-only verification.
 
-Omit `--apply` to install and **print the config without changing client settings**.
-Existing, different AgentTasker entries require an explicit `--replace`.
-Keep the checkout and `.venv` in place. See [setup and uninstall](docs/setup.md).
+Then ask the model to run four harmless jobs through AgentTasker and collect them.
+A custom VM-only guard may still block model calls even if the doctor passes.
+Obtain approval for the **exact trusted MCP source and SSH transport**—never a
+namespace wildcard. Do not disable the guard. Headless OMP tests with explicit
+`--tools` may need process-only `OMP_MCP_STARTUP_TIMEOUT_MS=5000` on cold startup.
 
-## Verify it
+| Tool | Purpose |
+| --- | --- |
+| `execute` | Run one shell task and wait |
+| `execute_batch` | Run a plan; `wait:false` returns a batch ID immediately |
+| `get_batch` | Collect progress/results; `wait_seconds` 0–30 |
+| `cancel_batch` | Cancel queued work and terminate running shell groups |
 
-Restart/reload your selected client so it loads the new MCP entry. Then run:
-
-```bash
-.venv/bin/agent-tasker-doctor --config /absolute/path/to/active/mcp.json --shell-test
-```
-
-The doctor starts **only the configured AgentTasker entry**, checks MCP, and
-explicitly runs four harmless `printf`/`sleep` jobs on that entry's execution host.
-It checks the four outputs, exits and overlapping timestamps. It does not change
-configuration. Omit `--shell-test` for a protocol-only check.
-
-Then ask your agent:
-
-> Use AgentTasker to run four harmless, independent shell jobs in the background.
-> Collect the batch and report each output, exit code, execution host and directory.
-> Confirm they really overlapped; do not substitute built-in Bash for this test.
-
-A successful doctor proves the transport/server works—not that a custom
-Pi/OMP permission extension permits the model to call it. Test the real session too.
-
-## Run commands on a VM instead
-
-Install AgentTasker **on the VM** and generate an SSH transport on the client.
-Do not use the local quick-start entry for a remote-only profile.
-
-**[SSH setup →](docs/ssh.md)** · **[Custom VM-only policies →](docs/agent-guide.md#custom-tool-guards)**
-
-There are no hard-coded hosts, usernames, keys, personal directories or profile
-policies. Nothing scans your network, copies credentials or rents a server.
-
-## How the tools work
-
-Your model calls `execute_batch` with a plan like this:
+Example `execute_batch` arguments:
 
 ```json
 {
@@ -144,52 +131,39 @@ Your model calls `execute_batch` with a plan like this:
 }
 ```
 
-It gets a `batch_id` immediately and collects results with:
+Collect with `{"batch_id":"RETURNED_ID","wait_seconds":5,"output_mode":"full"}`.
+Use `depends_on:["earlier-name"]` only for ordering. Optional task fields: absolute
+execution-host `cwd`, string `env` overrides, `timeout` (default 30 seconds), and
+`max_output_bytes` (retained tail per stream: default 8192, maximum 65536).
+Compact output shows finished tasks; full output includes queued/running placeholders.
+Check every status, exit code and truncation flag. A failure blocks dependants,
+not unrelated jobs. `cd` and environment changes do not persist across tasks.
 
-```json
-{"batch_id": "THE_RETURNED_ID", "wait_seconds": 5, "output_mode": "full"}
-```
+For your active profile's `AGENTS.md`, a short optional note is enough:
 
-Use `depends_on: ["earlier-task-name"]` for dependent steps, and `cancel_batch`
-to stop unwanted jobs. Every command has its own cwd/environment; `cd` and shell
-variables do not persist between commands. Avoid concurrent writes to one worktree.
+> Use AgentTasker for independent shell work: plan first, execute_batch with
+> wait:false and concurrency:4, then get_batch. Check outputs, exits and host/cwd.
+> Use depends_on for ordering and cancel_batch to stop work. Avoid concurrent
+> writes to the same worktree. Never retry side effects blindly after disconnect.
 
-| Tool | Purpose |
-| --- | --- |
-| `execute` | Run one task and wait |
-| `execute_batch` | Run a plan concurrently; `wait:false` returns immediately |
-| `get_batch` | Retrieve status and results, optionally waiting up to 30 seconds |
-| `cancel_batch` | Cancel queued jobs and terminate running shell process groups |
-| `list_remote_tools` | Discover explicitly configured downstream MCP tools (optional) |
+## Limits and maintenance
 
-[Task fields, dependencies and limits →](docs/reference.md)
+- Jobs/results are **session-local** and disappear on MCP/client restart or SSH loss.
+- No live stdout streaming or durable log storage. Redirect to a host file for full logs.
+- Four workers per server process, not per entire machine. Separate clients have separate limits.
+- No automatic shell retries. Process-group cleanup cannot contain deliberately detached
+  processes or guarantee cleanup after SIGKILL, transport loss or host failure.
+- Resource defaults: 1000 tasks/batch, 1 MB payload/task, 32 retained batches, 1-hour
+  completed retention. Override with `AGENT_TASKER_MAX_TASKS`, `AGENT_TASKER_MAX_PAYLOAD_BYTES`,
+  `AGENT_TASKER_MAX_BATCHES`, `AGENT_TASKER_BATCH_TTL_SECONDS` on the server.
+- **2.0 is shell-only:** optional web/search/downstream-MCP tasks and their CLI flags
+  from 1.x were removed. Existing shell task/config arguments are unchanged.
 
-## Honest limits
+Update after collecting active work: `git pull --ff-only`, then `.venv/bin/python -m pip install .`.
+Reload the client and rerun verification. To uninstall, remove **only** `agent-tasker`
+from the selected config, reload, then remove unused installations. Do not restore
+an old whole-config backup over unrelated newer settings.
 
-- **Session-local:** jobs/results do not survive MCP restart, client exit or SSH loss.
-- **Not extra autonomous agents:** this runs commands; your existing model plans and interprets.
-- **No live stdout streaming:** results appear when each task finishes. Output is bounded tails,
-  not a durable log store. Redirect to a host file when you need complete logs.
-- **Not a sandbox:** commands can access that user's files, environment and network.
-- **No automatic retries for shell commands.** After disconnect, verify side effects before retrying.
-- **Four workers per server process**, not per entire computer. Separate clients have separate limits.
-- Processes deliberately escaping their process group, SIGKILL and host failure can prevent cleanup.
-
-## Development
-
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[test]'
-.venv/bin/python -m unittest discover -s tests
-```
-
-Tests use harmless local subprocesses and local HTTP/MCP fixtures—no API keys,
-private VMs or paid model calls. CI tests Linux/macOS, builds a wheel, and verifies
-a clean install. [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
-
-Optional web fetching/search and downstream MCP batching remain available, disabled
-unless configured: [web tools](docs/web-retrieval.md).
-
-MIT licensed. Derived from [AgentTasker MCP](https://github.com/S3bRR/agent-tasker-mcp);
-original license attribution is preserved. This repository starts with fresh Git
-history and contains no personal deployment/configuration files.
+CI verifies source/wheel installs and the doctor on Linux/macOS with Python 3.10/3.12.
+Build with `.venv/bin/python -m pip install build && .venv/bin/python -m build`. No test suite or extra
+runtime dependencies are shipped. MIT license; original attribution is preserved.

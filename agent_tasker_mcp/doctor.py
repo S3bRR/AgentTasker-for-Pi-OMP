@@ -116,7 +116,7 @@ def verify(entry, *, shell_test=False, timeout=15):
         probe.send("notifications/initialized", notification=True)
         tools = probe.send("tools/list")["tools"]
         names = {tool["name"] for tool in tools}
-        required = {"execute", "execute_batch", "get_batch", "cancel_batch", "list_remote_tools"}
+        required = {"execute", "execute_batch", "get_batch", "cancel_batch"}
         if not required <= names:
             raise ValueError("Server is missing required AgentTasker tools")
         report = {"protocol_ok": True, "server": initialized["serverInfo"], "tools": sorted(names),
@@ -150,6 +150,33 @@ def verify(entry, *, shell_test=False, timeout=15):
                 "hosts": sorted({t["result"]["host"] for t in tasks}),
                 "directories": sorted({t["result"]["cwd"] for t in tasks}),
                 "outputs": [t["result"]["stdout"].strip() for t in tasks]})
+            failure = probe.send("tools/call", {"name": "execute_batch", "arguments": {
+                "output_mode": "full", "tasks": [
+                    {"name": "fail", "task_type": "shell", "command": "exit 7"},
+                    {"name": "blocked", "task_type": "shell", "command": "exit 0", "depends_on": ["fail"]},
+                    {"name": "independent", "task_type": "shell", "command": "printf independent"}]}})
+            data = failure.get("structuredContent", {})
+            if not failure.get("isError") or data.get("failed") != 2 or data.get("completed") != 1:
+                raise ValueError("Failure/dependency isolation check failed")
+            if data["results"][0]["result"]["exit_code"] != 7 or data["results"][1]["result"] is not None:
+                raise ValueError("Failed dependency executed or lost its original exit code")
+            pending = probe.call("execute_batch", {"wait": False, "tasks": [
+                {"task_type": "shell", "command": "sleep 30"}]})
+            pending_id = pending["batch_id"]
+            active = probe.call("get_batch", {"batch_id": pending_id, "wait_seconds": 1, "output_mode": "full"})
+            if active.get("running") != 1:
+                raise ValueError("Cancellation probe never reached a running command")
+            probe.call("cancel_batch", {"batch_id": pending_id})
+            stopped = probe.call("get_batch", {"batch_id": pending_id, "wait_seconds": 5, "output_mode": "full"})
+            if stopped.get("cancelled") != 1 or not stopped["results"][0]["result"]["cancelled"]:
+                raise ValueError("Running shell cancellation check failed")
+            expired = probe.send("tools/call", {"name": "execute", "arguments": {
+                "task_type": "shell", "command": "sleep 2", "timeout": 1, "output_mode": "full"}})
+            expired_task = expired.get("structuredContent", {}).get("task", {})
+            if not expired.get("isError") or not (expired_task.get("result") or {}).get("timed_out"):
+                raise ValueError("Shell timeout check failed")
+            report["checks"] = ["four-way overlap", "failed dependency isolation", "running cancellation", "timeout"]
+
         return report
     finally:
         probe.close()
@@ -159,7 +186,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Verify a trusted MCP config. Does not change configuration. --shell-test explicitly runs four harmless commands on its configured host.")
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--shell-test", action="store_true", help="Run four printf/sleep shell commands on the configured execution host")
-    parser.add_argument("--timeout", type=int, default=15, choices=range(1, 31), metavar="1..30")
+    parser.add_argument("--timeout", type=int, default=15, choices=range(5, 31), metavar="5..30")
     args = parser.parse_args(argv)
     try:
         config, _ = read_config(args.config)

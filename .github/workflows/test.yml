@@ -1,4 +1,4 @@
-name: Tests
+name: Verify
 
 on:
   push:
@@ -23,12 +23,18 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6, Node 24
         with:
           python-version: ${{ matrix.python }}
-      - name: Install test/build dependencies
-        run: python -m pip install -e '.[test]' build
+      - name: Install build tools and source package
+        run: python -m pip install -e . build
       - name: Public-tree safety checks
         run: python scripts/check_public_tree.py
-      - name: Unit, subprocess and MCP interoperability tests
-        run: python -m unittest discover -s tests
+      - name: Verify the source package
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/tasker-workspace"
+          python install.py --client generic --skip-install --venv "$pythonLocation" \
+            --cwd "$RUNNER_TEMP/tasker-workspace" --allow-shell \
+            > "$RUNNER_TEMP/tasker-source.json"
+          python -m agent_tasker_mcp.doctor --config "$RUNNER_TEMP/tasker-source.json" --shell-test
       - name: Build source and wheel distributions
         run: python -m build
       - name: Verify a clean wheel install and doctor

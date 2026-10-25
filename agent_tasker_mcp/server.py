@@ -1,4 +1,4 @@
-"""Search-first stdio MCP server and bounded parallel execution engine."""
+"""Shell-only stdio MCP server and bounded parallel scheduler."""
 
 from __future__ import annotations
 
@@ -8,31 +8,18 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime
 from graphlib import CycleError, TopologicalSorter
-import json
 import os
 import signal
-from pathlib import Path
 import sys
 from threading import Event, Lock, local
 import time
 import uuid
 
-try:
-    import resource
-except ImportError:  # Windows
-    resource = None
-
 from .batches import BatchManager
-from .cache import SearchCache
-from .common import apply_output_mode
-from .configuration import CLIENTS, SEARCH_PROVIDERS, render_config, search_providers, server_args
-from .executors.shell import ShellExecutor
-from .executors.discovery import execute_discovery_search
-from .executors.http import execute_web_scrape, RateLimiter
+from .shell import ShellExecutor
 from .models import DEFAULT_MAX_BATCHES, DEFAULT_BATCH_TTL_SECONDS, DEFAULT_MAX_PAYLOAD_BYTES, DEFAULT_MAX_TASKS, DEFAULT_MAX_WORKERS, TaskType
 from .protocol import MAX_MESSAGE_BYTES, PROTOCOLS, dumps, loads, valid_id, validate_initialize
-from .registry import TASK_PROPERTIES, cancel_batch_schema, check_keys, execute_batch_schema, execute_schema, get_batch_schema, option, output_schema, remote_tools_schema, validate_name, validate_payload
-from .remote import RemoteTools
+from .registry import TASK_PROPERTIES, cancel_batch_schema, check_keys, execute_batch_schema, execute_schema, get_batch_schema, option, output_schema, validate_name, validate_payload
 from .version import package_version
 
 SERVER_NAME, SERVER_VERSION = "agent-tasker", package_version()
@@ -73,10 +60,6 @@ def _jsonrpc_error(request_id, code, message):
 
 def _tool_result(payload, *, is_error=False, structured=True):
     content = [{"type": "text", "text": dumps(payload)}]
-    for task in [payload.get("task"), *payload.get("results", [])]:
-        result = task.get("result") if isinstance(task, dict) else None
-        if isinstance(result, dict):
-            content.extend(item for item in result.get("content", []) if item.get("type") != "text")
     return {"content": content, **({"structuredContent": payload} if structured else {}), "isError": is_error}
 
 
@@ -86,28 +69,20 @@ def _tool_payload_failed(payload):
 
 class AgentTasker:
     def __init__(self, max_workers=DEFAULT_MAX_WORKERS, max_tasks=DEFAULT_MAX_TASKS,
-                 max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES, providers=None, mcp_servers=None, max_memory_mb=0,
-                 cache_ttl_seconds=60, cache_max_entries=128, cache_max_bytes=8_000_000, reader_fallback="none", allow_shell=False, shell_cwd=None):
+                 max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES, allow_shell=False, shell_cwd=None):
         for name, value in (("max_workers", max_workers), ("max_tasks", max_tasks), ("max_payload_bytes", max_payload_bytes)):
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ValueError(f"'{name}' must be a positive integer")
+        if max_workers > 256:
+            raise ValueError("max_workers must not exceed 256")
         self.max_workers, self.max_tasks, self.max_payload_bytes = max_workers, max_tasks, max_payload_bytes
         self.shutdown = Event()
         self.shell = ShellExecutor(shell_cwd) if allow_shell else None
-        self.max_memory_mb = max_memory_mb
-        self.providers = providers
-        self.reader_fallback = validate_payload(TaskType.WEB_SCRAPE, {"url": "https://example.com", "reader_fallback": reader_fallback})["reader_fallback"]
-        if providers is not None:
-            validate_payload(TaskType.DISCOVERY_SEARCH, {"query": "config validation", "providers": providers})
-        self.remote = RemoteTools(mcp_servers)
-        self.cache = SearchCache(cache_ttl_seconds, cache_max_entries, cache_max_bytes)
-        self.limiter = RateLimiter()
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="tasker-work")
 
     def close(self):
         self.shutdown.set()
         self.executor.shutdown(wait=True, cancel_futures=True)
-        self.remote.close()
 
     def validate_concurrency(self, value):
         if value is None:
@@ -117,10 +92,6 @@ class AgentTasker:
     def _prepare_tasks(self, definitions):
         if len(definitions) > self.max_tasks:
             raise ValueError(f"Task limit reached ({self.max_tasks})")
-        if self.max_memory_mb > 0 and resource is not None:
-            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            if rss / (1024 * 1024 if sys.platform == "darwin" else 1024) > self.max_memory_mb:
-                raise RuntimeError("Memory guard triggered")
         prepared, names = [], set()
         for definition in definitions:
             if len(definition) not in (3, 4):
@@ -130,25 +101,17 @@ class AgentTasker:
             if name in names:
                 raise ValueError(f"Duplicate task name: {name}")
             names.add(name)
-            if kind == TaskType.DISCOVERY_SEARCH and "providers" not in source and self.providers is not None:
-                source = {**source, "providers": self.providers}
-            if kind in {TaskType.WEB_SCRAPE, TaskType.DISCOVERY_SEARCH}:
-                source = {"reader_fallback": self.reader_fallback, **source}
-            if kind == TaskType.SHELL and self.shell is None:
+            if self.shell is None:
                 raise ValueError("Shell execution is disabled; start the server with --allow-shell to opt in")
             payload = validate_payload(kind, source)
-            if kind == TaskType.SHELL and "cwd" in payload:
+            if "cwd" in payload:
                 self.shell.validate_cwd(payload["cwd"])
-            if payload.get("reader_fallback") == "jina" and self.reader_fallback != "jina":
-                raise ValueError("Jina fallback is disabled; start the server with --reader-fallback jina to opt in")
             if len(dumps(payload).encode("utf-8")) > self.max_payload_bytes:
                 raise ValueError("Payload too large")
             dependencies = definition[3] if len(definition) == 4 else []
             if not isinstance(dependencies, list):
                 raise ValueError("'depends_on' must be an array of task names")
             dependencies = tuple(dict.fromkeys(validate_name(item) for item in dependencies))
-            if kind == TaskType.MCP_TOOL:
-                self.remote.validate_call(payload["server"], payload["tool"])
             prepared.append(_PreparedTask(uuid.uuid4().hex[:12], name, kind, payload, dependencies))
         pending = {task.name: set(task.depends_on) for task in prepared}
         for name, dependencies in pending.items():
@@ -168,22 +131,13 @@ class AgentTasker:
         started, result, error, status = time.perf_counter(), None, None, "completed"
         started_at = _now_iso()
         try:
-            if task.task_type == TaskType.DISCOVERY_SEARCH:
-                result = self.cache.run(task.payload, lambda payload: execute_discovery_search(payload, limiter=self.limiter))
-            elif task.task_type == TaskType.WEB_SCRAPE:
-                result = execute_web_scrape(task.payload, limiter=self.limiter)
-            elif task.task_type == TaskType.SHELL:
-                result = self.shell.run(task.payload, cancel=cancel, shutdown=self.shutdown)
-                if result["cancelled"]:
-                    status, error = "cancelled", "Shell command cancelled"
-                elif result["timed_out"]:
-                    status, error = "failed", "Shell command timed out"
-                elif result["exit_code"] != 0:
-                    status, error = "failed", f"Shell exited with code {result['exit_code']}"
-            else:
-                result = self.remote.call(task.payload)
-                if result.get("isError"):
-                    status, error = "failed", "Remote tool reported an error (see result)"
+            result = self.shell.run(task.payload, cancel=cancel, shutdown=self.shutdown)
+            if result["cancelled"]:
+                status, error = "cancelled", "Shell command cancelled"
+            elif result["timed_out"]:
+                status, error = "failed", "Shell command timed out"
+            elif result["exit_code"] != 0:
+                status, error = "failed", f"Shell exited with code {result['exit_code']}"
         except Exception as exc:
             error, status = str(exc), "failed"
         return {**self._record(task, status, result, error), "started_at": started_at,
@@ -274,7 +228,7 @@ def _task_definition(source, index, *, single=False):
     try:
         kind = TaskType(source["task_type"])
     except (KeyError, ValueError, TypeError) as exc:
-        raise ValueError("task_type must be discovery_search, web_scrape, mcp_tool, or shell") from exc
+        raise ValueError("task_type must be shell") from exc
     check_keys(source, {**TASK_PROPERTIES, **({"output_mode": {}} if single else {})})
     name = source.get("name", f"{kind.value}_{index + 1}")
     return name, kind, source, source.get("depends_on", [])
@@ -292,15 +246,21 @@ def _output_mode(arguments):
 
 
 def _format_execution(raw, *, output_mode):
-    return apply_output_mode(raw, output_mode)
+    if output_mode == "full":
+        return raw
+    result = {key: raw[key] for key in ("batch_id", "status", "error") if raw.get(key) is not None}
+    if "batch_id" in raw:
+        result["progress"] = {"done": raw["completed"] + raw["failed"] + raw["cancelled"], "total": raw["total"]}
+    result["results"] = [{key: task[key] for key in ("name", "status", "error", "result") if task.get(key) is not None}
+                         for task in raw["results"] if task["status"] not in {"queued", "running"}]
+    return result
 
 
 _PUBLIC_TOOL_SPECS = (
-    ("execute", "Run one search, page fetch, configured MCP tool, or opt-in shell command on the server host.", execute_schema),
+    ("execute", "Run one opt-in shell command on the server host.", execute_schema),
     ("execute_batch", "Run independent tasks in parallel, including opt-in shell commands. Use depends_on for a plan; concurrency sets the limit, wait=false returns a batch_id immediately.", execute_batch_schema),
     ("get_batch", "Collect background progress and finished results; full mode includes unfinished placeholders.", get_batch_schema),
-    ("cancel_batch", "Cancel queued tasks and terminate running shell process groups. In-flight HTTP/MCP operations may finish normally.", cancel_batch_schema),
-    ("list_remote_tools", "List configured server names or discover tool schemas on one remote MCP server.", remote_tools_schema),
+    ("cancel_batch", "Cancel queued tasks and terminate running shell process groups.", cancel_batch_schema),
 )
 
 
@@ -309,7 +269,6 @@ TOOL_ANNOTATIONS = {
     "execute_batch": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     "get_batch": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
     "cancel_batch": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
-    "list_remote_tools": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
 }
 
 
@@ -318,22 +277,17 @@ def _tool_catalog():
 
 
 class MCPServer:
-    def __init__(self, max_workers=DEFAULT_MAX_WORKERS, providers=None, mcp_servers=None, reader_fallback="none", allow_shell=False, shell_cwd=None):
-        self.tasker = AgentTasker(max_workers=max_workers, providers=providers, mcp_servers=mcp_servers,
+    def __init__(self, max_workers=DEFAULT_MAX_WORKERS, allow_shell=False, shell_cwd=None):
+        self.tasker = AgentTasker(max_workers=max_workers, allow_shell=allow_shell, shell_cwd=shell_cwd,
             max_tasks=_env_int("AGENT_TASKER_MAX_TASKS", DEFAULT_MAX_TASKS),
-            max_payload_bytes=_env_int("AGENT_TASKER_MAX_PAYLOAD_BYTES", DEFAULT_MAX_PAYLOAD_BYTES),
-            max_memory_mb=_env_int("AGENT_TASKER_MAX_MEMORY_MB", 0),
-            cache_ttl_seconds=_env_int("AGENT_TASKER_CACHE_TTL_SECONDS", 60),
-            cache_max_entries=_env_int("AGENT_TASKER_CACHE_MAX_ENTRIES", 128),
-            cache_max_bytes=_env_int("AGENT_TASKER_CACHE_MAX_BYTES", 8_000_000), reader_fallback=reader_fallback,
-            allow_shell=allow_shell, shell_cwd=shell_cwd)
+            max_payload_bytes=_env_int("AGENT_TASKER_MAX_PAYLOAD_BYTES", DEFAULT_MAX_PAYLOAD_BYTES))
         self.batches = BatchManager(self.tasker, max_batches=_env_int("AGENT_TASKER_MAX_BATCHES", DEFAULT_MAX_BATCHES),
                                     ttl_seconds=_env_int("AGENT_TASKER_BATCH_TTL_SECONDS", DEFAULT_BATCH_TTL_SECONDS))
         self._initialize_sent = self._ready = False
         self._protocol_version = PROTOCOLS[0]
         self._request_context, self._request_lock, self._inflight = local(), Lock(), {}
         self.handlers = {"execute": self._execute, "execute_batch": self._execute_batch, "get_batch": self._get_batch,
-                         "cancel_batch": self._cancel_batch, "list_remote_tools": self._list_remote_tools}
+                         "cancel_batch": self._cancel_batch}
 
     def close(self):
         self.batches.close()
@@ -342,10 +296,7 @@ class MCPServer:
     def _list_tools(self):
         tools = []
         for name, description, schema in _tool_catalog():
-            if name == "execute":
-                schema["properties"]["reader_fallback"]["default"] = self.tasker.reader_fallback
             if name == "execute_batch":
-                schema["properties"]["tasks"]["items"]["properties"]["reader_fallback"]["default"] = self.tasker.reader_fallback
                 schema["properties"]["concurrency"].update(maximum=self.tasker.max_workers, default=self.tasker.max_workers)
                 schema["properties"]["tasks"]["maxItems"] = self.tasker.max_tasks
             tool = {"name": name, "title": name.replace("_", " ").title(), "description": description, "inputSchema": schema}
@@ -381,10 +332,6 @@ class MCPServer:
     def _cancel_batch(self, arguments):
         return _format_execution(self.batches.cancel(validate_name(arguments.get("batch_id"))), output_mode="compact")
 
-    def _list_remote_tools(self, arguments):
-        server = validate_name(arguments["server"]) if "server" in arguments else None
-        return self.tasker.remote.list_tools(server)
-
     def _require_ready(self):
         if not self._initialize_sent or not self._ready:
             raise _LifecycleError("Server not initialized")
@@ -408,11 +355,11 @@ class MCPServer:
             self._initialize_sent, self._ready = True, False
             return {"protocolVersion": self._protocol_version, "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                "instructions": f"Tasks: discovery_search, web_scrape, mcp_tool, or opt-in shell. Use execute_batch for up to {self.tasker.max_workers} parallel calls; wait=false returns a batch_id for get_batch/cancel_batch. Compact mode returns only finished tasks. cache=false forces fresh searches. list_remote_tools discovers configured MCP tools. "
-                    + ("Jina fallback is enabled for public pages; reader_fallback=none disables it. " if self.tasker.reader_fallback == "jina" else "Hosted reader fallback is disabled. ")
-                    + ("Default search providers are configured. " if self.tasker.providers else "Search needs provider definitions. ")
-                    + (f"Shell ENABLED on server host; default cwd: {self.tasker.shell.cwd}. Shell tasks are arbitrary code, not sandboxed. Use explicit absolute cwd; never assume client SSH routing applies. Cancellation kills process groups; HTTP/MCP calls may finish. " if self.tasker.shell else "Shell execution is disabled. ")
-                    + f"Configured MCP servers: {', '.join(self.tasker.remote.clients) or 'none'}."}
+                "instructions": f"Plan shell work with execute_batch (up to {self.tasker.max_workers} concurrent jobs). "
+                    "wait=false returns a batch_id immediately; collect it with get_batch and stop unwanted work with cancel_batch. "
+                    "Use depends_on for ordering. Check every exit code, host, cwd and output. Results are session-local, not durable. "
+                    + (f"Shell ENABLED on the server host; default cwd: {self.tasker.shell.cwd}. " if self.tasker.shell else "Shell execution is disabled. ")
+                    + "Commands are arbitrary code, not sandboxed. Client SSH routing is not inherited; never silently fall back locally."}
         if method == "ping":
             return {}
         if method == "tools/list":
@@ -531,46 +478,20 @@ class MCPServer:
             self.close()
 
 
-def create_server(max_workers=DEFAULT_MAX_WORKERS, providers=None, mcp_servers=None, reader_fallback="none", **options):
-    return MCPServer(max_workers, providers, mcp_servers, reader_fallback, **options)
+def create_server(max_workers=DEFAULT_MAX_WORKERS, **options):
+    return MCPServer(max_workers, **options)
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="AgentTasker: parallel searches, MCP tools and opt-in shell commands")
-    parser.add_argument("--workers", "-w", type=int, default=DEFAULT_MAX_WORKERS, help="Parallel workers (default: 10)")
-    search = parser.add_mutually_exclusive_group()
-    search.add_argument("--providers-file", default=os.getenv("AGENT_TASKER_PROVIDERS_FILE"), help="Default HTTP search provider JSON array")
-    search.add_argument("--search-provider", choices=SEARCH_PROVIDERS, help="Built-in Brave (BRAVE_SEARCH_API_KEY) or SearXNG search")
-    parser.add_argument("--searxng-url", help="SearXNG instance base URL (default: http://localhost:8080)")
-    parser.add_argument("--reader-fallback", choices=["none", "jina"], default="none", help="Opt in to hosted Jina fallback for public webpages; optionally reads JINA_API_KEY")
-    parser.add_argument("--mcp-config", default=os.getenv("AGENT_TASKER_MCP_CONFIG"), help="JSON config with mcpServers (stdio only)")
-    parser.add_argument("--print-config", choices=CLIENTS, help="Print client configuration and exit; never changes harness settings")
-    parser.add_argument("--allow-shell", action="store_true", help="Enable arbitrary Bash commands on this server host (POSIX only; not sandboxed)")
-    parser.add_argument("--shell-cwd", help="Default absolute directory on the server host; requires --allow-shell")
+    parser = argparse.ArgumentParser(description="AgentTasker: parallel background shell jobs for Pi and OMP")
+    parser.add_argument("--workers", "-w", type=int, default=DEFAULT_MAX_WORKERS, help="Concurrent workers (default: 4, max: 256)")
+    parser.add_argument("--allow-shell", action="store_true", help="Enable arbitrary Bash commands on this host (not sandboxed)")
+    parser.add_argument("--shell-cwd", help="Default absolute execution directory; requires --allow-shell")
     args = parser.parse_args(argv)
     if args.shell_cwd and not args.allow_shell:
         parser.error("--shell-cwd requires --allow-shell")
-    if args.workers < 1:
-        parser.error("--workers must be a positive integer")
     try:
-        providers = search_providers(args.search_provider, args.searxng_url)
-    except ValueError as exc:
-        parser.error(str(exc))
-    if args.print_config:
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8")
-        print(render_config(args.print_config, sys.executable, server_args(args.workers, args.providers_file, args.mcp_config, args.search_provider, args.searxng_url, args.reader_fallback, args.allow_shell, args.shell_cwd)), end="")
-        return 0
-    try:
-        if args.providers_file and not args.search_provider:
-            providers = json.loads(Path(args.providers_file).read_text())
-        remote = json.loads(Path(args.mcp_config).read_text()) if args.mcp_config else {}
-        if args.providers_file and not isinstance(providers, list):
-            raise ValueError("Provider config must be a JSON array")
-        if not isinstance(remote, dict) or not isinstance(remote.get("mcpServers", {}), dict) or (args.mcp_config and "mcpServers" not in remote):
-            raise ValueError("MCP config needs an mcpServers object")
-        shell_options = {"allow_shell": True, "shell_cwd": args.shell_cwd} if args.allow_shell else {}
-        server = create_server(args.workers, providers, remote.get("mcpServers", {}), reader_fallback=args.reader_fallback, **shell_options)
+        server = create_server(args.workers, allow_shell=args.allow_shell, shell_cwd=args.shell_cwd)
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
     for stream in (sys.stdin, sys.stdout):

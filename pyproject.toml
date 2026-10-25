@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-tasker-pi-omp"
-version = "1.0.0"
+version = "2.0.0"
 description = "Parallel background shell tasks for Pi and OMP over local or SSH MCP transports"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,9 +21,6 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules"
 ]
 
-[project.optional-dependencies]
-test = ["mcp>=1.30,<2", "jsonschema>=4.23,<5"]
-
 [project.urls]
 Homepage = "https://github.com/S3bRR/AgentTasker-for-Pi-OMP"
 Repository = "https://github.com/S3bRR/AgentTasker-for-Pi-OMP"
@@ -34,4 +31,4 @@ agent-tasker = "agent_tasker_mcp.server:cli"
 agent-tasker-doctor = "agent_tasker_mcp.doctor:main"
 
 [tool.setuptools]
-packages = ["agent_tasker_mcp", "agent_tasker_mcp.executors"]
+packages = ["agent_tasker_mcp"]
