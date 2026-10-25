@@ -1,0 +1,20 @@
+"""Search-first task types and resource limits."""
+
+from enum import Enum
+
+
+class TaskType(Enum):
+    DISCOVERY_SEARCH = "discovery_search"
+    WEB_SCRAPE = "web_scrape"
+    MCP_TOOL = "mcp_tool"
+    SHELL = "shell"
+
+
+ALLOWED_HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
+RETRYABLE_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+DEFAULT_MAX_WORKERS = 10
+DEFAULT_MAX_BATCHES = 32
+DEFAULT_BATCH_TTL_SECONDS = 3600
+DEFAULT_MAX_TASKS = 1000
+DEFAULT_MAX_PAYLOAD_BYTES = 1_000_000
+DEFAULT_MAX_BODY_BYTES = 2_000_000

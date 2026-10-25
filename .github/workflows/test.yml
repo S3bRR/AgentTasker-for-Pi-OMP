@@ -1,0 +1,45 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install test/build dependencies
+        run: python -m pip install -e '.[test]' build
+      - name: Public-tree safety checks
+        run: python scripts/check_public_tree.py
+      - name: Unit, subprocess and MCP interoperability tests
+        run: python -m unittest discover -s tests
+      - name: Build source and wheel distributions
+        run: python -m build
+      - name: Verify a clean wheel install and doctor
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/tasker-clean"
+          "$RUNNER_TEMP/tasker-clean/bin/python" -m pip install dist/*.whl
+          mkdir -p "$RUNNER_TEMP/tasker-workspace"
+          python install.py --client generic --skip-install --venv "$RUNNER_TEMP/tasker-clean" \
+            --cwd "$RUNNER_TEMP/tasker-workspace" --allow-shell \
+            > "$RUNNER_TEMP/tasker-generated.json"
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/tasker-clean/bin/agent-tasker-doctor" \
+            --config "$RUNNER_TEMP/tasker-generated.json" --shell-test

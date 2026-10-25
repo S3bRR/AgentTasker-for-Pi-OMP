@@ -1,0 +1,10 @@
+{
+  "wait": false,
+  "concurrency": 4,
+  "tasks": [
+    {"name": "identity", "task_type": "shell", "command": "id", "timeout": 10},
+    {"name": "directory", "task_type": "shell", "command": "pwd", "timeout": 10},
+    {"name": "files", "task_type": "shell", "command": "ls -la | head -20", "timeout": 10},
+    {"name": "platform", "task_type": "shell", "command": "uname -s", "timeout": 10}
+  ]
+}
